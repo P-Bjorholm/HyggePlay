@@ -1,0 +1,82 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="HyggePlay.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:HyggePlay"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <Grid Background="#FF1E1E1E">
+        <!-- Login Page Content -->
+        <Border Background="#FF2D2D30" 
+                CornerRadius="8" 
+                MaxWidth="400" 
+                MaxHeight="500"
+                HorizontalAlignment="Center" 
+                VerticalAlignment="Center"
+                Padding="40">
+            <StackPanel Spacing="20">
+                <!-- App Title -->
+                <TextBlock Text="HyggePlay IPTV Player" 
+                           HorizontalAlignment="Center"
+                           FontSize="28"
+                           FontWeight="SemiBold"
+                           Foreground="White"
+                           Margin="0,0,0,20"/>
+                
+                <!-- Server URL Field -->
+                <StackPanel Spacing="8">
+                    <TextBlock Text="Server URL" 
+                               Foreground="White" 
+                               FontSize="14"/>
+                    <TextBox x:Name="ServerUrlTextBox" 
+                             PlaceholderText="https://your-server.com"
+                             Background="#FF3C3C3C"
+                             Foreground="White"
+                             BorderBrush="#FF007ACC"
+                             Padding="12,8"/>
+                </StackPanel>
+                
+                <!-- Username Field -->
+                <StackPanel Spacing="8">
+                    <TextBlock Text="Username" 
+                               Foreground="White" 
+                               FontSize="14"/>
+                    <TextBox x:Name="UsernameTextBox" 
+                             PlaceholderText="Enter your username"
+                             Background="#FF3C3C3C"
+                             Foreground="White"
+                             BorderBrush="#FF007ACC"
+                             Padding="12,8"/>
+                </StackPanel>
+                
+                <!-- Password Field -->
+                <StackPanel Spacing="8">
+                    <TextBlock Text="Password" 
+                               Foreground="White" 
+                               FontSize="14"/>
+                    <PasswordBox x:Name="PasswordBox" 
+                                 PlaceholderText="Enter your password"
+                                 Background="#FF3C3C3C"
+                                 Foreground="White"
+                                 BorderBrush="#FF007ACC"
+                                 Padding="12,8"/>
+                </StackPanel>
+
+                <!-- Login Button -->
+                <Button x:Name="LoginButton" 
+                        Content="Login" 
+                        HorizontalAlignment="Stretch"
+                        Background="#FF007ACC"
+                        Foreground="White"
+                        Padding="0,12"
+                        FontSize="16"
+                        FontWeight="SemiBold"
+                        Margin="0,20,0,0"/>
+                
+            </StackPanel>
+        </Border>
+    </Grid>
+</Window>
