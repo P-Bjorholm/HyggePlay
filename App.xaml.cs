@@ -30,6 +30,14 @@ public partial class App : Application
     public App()
     {
         this.InitializeComponent();
+        this.UnhandledException += App_UnhandledException;
+    }
+
+    private void App_UnhandledException(object sender, Microsoft.UI.Xaml.UnhandledExceptionEventArgs e)
+    {
+        System.Diagnostics.Debug.WriteLine($"Unhandled exception: {e.Exception.Message}");
+        System.Diagnostics.Debug.WriteLine($"Stack trace: {e.Exception.StackTrace}");
+        e.Handled = true;
     }
 
     /// <summary>

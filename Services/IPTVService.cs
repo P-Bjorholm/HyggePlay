@@ -1,10 +1,11 @@
+using HyggePlay.Models;
 using System;
 using System.Collections.Generic;
 using System.Net.Http;
 using System.Text.Json;
 using System.Threading.Tasks;
 
-namespace HyggePlay;
+namespace HyggePlay.Services;
 
 /// <summary>
 /// Barebones Xtream Codes IPTV service
@@ -98,6 +99,14 @@ public class IPTVService
         }
     }
     
+    private void EnsureAuthenticated()
+    {
+        if (string.IsNullOrEmpty(_serverUrl) || string.IsNullOrEmpty(_username) || string.IsNullOrEmpty(_password))
+        {
+            throw new InvalidOperationException("The IPTV service has not been authenticated yet.");
+        }
+    }
+    
     private UserInfo ParseUserInfo(JsonElement userInfo)
     {
         return new UserInfo
@@ -120,6 +129,128 @@ public class IPTVService
         }
         
         return serverUrl.TrimEnd('/');
+    }
+    
+    public async Task<List<ChannelGroupInfo>> GetLiveCategoriesAsync()
+    {
+        EnsureAuthenticated();
+
+        List<ChannelGroupInfo> groups = new();
+        try
+        {
+            string categoriesUrl = $"{_serverUrl}/player_api.php?username={_username}&password={_password}&action=get_live_categories";
+            HttpResponseMessage response = await _httpClient.GetAsync(categoriesUrl);
+            if (!response.IsSuccessStatusCode)
+            {
+                return groups;
+            }
+
+            string json = await response.Content.ReadAsStringAsync();
+            using JsonDocument doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind == JsonValueKind.Array)
+            {
+                foreach (JsonElement element in doc.RootElement.EnumerateArray())
+                {
+                    string? id = element.TryGetProperty("category_id", out JsonElement idProp) ? idProp.GetString() : null;
+                    if (string.IsNullOrEmpty(id))
+                    {
+                        continue;
+                    }
+
+                    string name = element.TryGetProperty("category_name", out JsonElement nameProp) ? nameProp.GetString() ?? string.Empty : string.Empty;
+                    if (string.IsNullOrEmpty(name))
+                    {
+                        name = $"Group {id}";
+                    }
+
+                    groups.Add(new ChannelGroupInfo
+                    {
+                        GroupId = id,
+                        Name = name
+                    });
+                }
+            }
+        }
+        catch
+        {
+            // Swallow and return empty collection. Caller will handle surface errors separately.
+        }
+
+        return groups;
+    }
+
+    public async Task<List<ChannelInfo>> GetLiveChannelsAsync()
+    {
+        EnsureAuthenticated();
+
+        List<ChannelInfo> channels = new();
+
+        try
+        {
+            string streamsUrl = $"{_serverUrl}/player_api.php?username={_username}&password={_password}&action=get_live_streams";
+            HttpResponseMessage response = await _httpClient.GetAsync(streamsUrl);
+            if (!response.IsSuccessStatusCode)
+            {
+                return channels;
+            }
+
+            string json = await response.Content.ReadAsStringAsync();
+            using JsonDocument doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind == JsonValueKind.Array)
+            {
+                foreach (JsonElement element in doc.RootElement.EnumerateArray())
+                {
+                    string groupId = element.TryGetProperty("category_id", out JsonElement categoryProp) ? categoryProp.GetString() ?? string.Empty : string.Empty;
+                    if (string.IsNullOrEmpty(groupId))
+                    {
+                        groupId = "0";
+                    }
+
+                    int channelId = 0;
+                    if (element.TryGetProperty("stream_id", out JsonElement streamIdProp))
+                    {
+                        if (streamIdProp.ValueKind == JsonValueKind.Number && streamIdProp.TryGetInt32(out int parsedId))
+                        {
+                            channelId = parsedId;
+                        }
+                        else if (streamIdProp.ValueKind == JsonValueKind.String && int.TryParse(streamIdProp.GetString(), out int parsedIdFromString))
+                        {
+                            channelId = parsedIdFromString;
+                        }
+                    }
+
+                    if (channelId == 0)
+                    {
+                        continue;
+                    }
+
+                    string name = element.TryGetProperty("name", out JsonElement nameProp) ? nameProp.GetString() ?? $"Channel {channelId}" : $"Channel {channelId}";
+                    string? streamIcon = element.TryGetProperty("stream_icon", out JsonElement iconProp) ? iconProp.GetString() : null;
+                    string streamUrl = BuildStreamUrl(channelId);
+
+                    channels.Add(new ChannelInfo
+                    {
+                        ChannelId = channelId,
+                        Name = name,
+                        GroupId = groupId,
+                        StreamIcon = string.IsNullOrWhiteSpace(streamIcon) ? null : streamIcon,
+                        StreamUrl = streamUrl
+                    });
+                }
+            }
+        }
+        catch
+        {
+            // Ignore exceptions so UI can react accordingly.
+        }
+
+        return channels;
+    }
+
+    public string BuildStreamUrl(int streamId)
+    {
+        EnsureAuthenticated();
+        return $"{_serverUrl}/live/{_username}/{_password}/{streamId}.ts";
     }
     
     /// <summary>
