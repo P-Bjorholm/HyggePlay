@@ -6,6 +6,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using HyggePlay.Models;
 using HyggePlay.Services;
+using WinRT.Interop;
 
 namespace HyggePlay
 {
@@ -17,6 +18,7 @@ namespace HyggePlay
         private readonly ObservableCollection<ChannelInfo> _channels;
         private readonly ObservableCollection<ChannelInfo> _filteredChannels;
         private readonly ObservableCollection<ChannelGroupOption> _channelGroups;
+        private VideoPlayerService? _videoPlayerService;
 
         public MainWindow()
         {
@@ -344,6 +346,149 @@ namespace HyggePlay
             };
             dialog.XamlRoot = this.Content.XamlRoot;
             await dialog.ShowAsync();
+        }
+
+        // Video Player Methods
+        private async Task InitializeVideoPlayerAsync()
+        {
+            if (_videoPlayerService != null)
+                return;
+
+            try
+            {
+                _videoPlayerService = new VideoPlayerService();
+                
+                // Get window handle for mpv integration
+                var windowHandle = WindowNative.GetWindowHandle(this);
+                
+                var success = await _videoPlayerService.InitializeAsync(windowHandle);
+                if (!success)
+                {
+                    await ShowErrorDialog("Video Player Error", "Failed to initialize video player.");
+                    return;
+                }
+
+                // Subscribe to events
+                _videoPlayerService.ErrorOccurred += OnVideoPlayerError;
+                _videoPlayerService.PlaybackStarted += OnVideoPlayerPlaybackStarted;
+                _videoPlayerService.PlaybackPaused += OnVideoPlayerPlaybackPaused;
+                _videoPlayerService.PlaybackStopped += OnVideoPlayerPlaybackStopped;
+            }
+            catch (Exception ex)
+            {
+                await ShowErrorDialog("Video Player Error", $"Failed to initialize video player: {ex.Message}");
+            }
+        }
+
+        // Video Player Event Handlers
+        private async void OnPlayButtonClick(object sender, RoutedEventArgs e)
+        {
+            await InitializeVideoPlayerAsync();
+            if (_videoPlayerService != null)
+            {
+                await _videoPlayerService.PlayAsync();
+            }
+        }
+
+        private async void OnPauseButtonClick(object sender, RoutedEventArgs e)
+        {
+            if (_videoPlayerService != null)
+            {
+                await _videoPlayerService.PauseAsync();
+            }
+        }
+
+        private async void OnStopButtonClick(object sender, RoutedEventArgs e)
+        {
+            if (_videoPlayerService != null)
+            {
+                await _videoPlayerService.StopAsync();
+                CurrentChannelText.Text = "No media loaded";
+            }
+        }
+
+        private async void OnLoadTestStreamButtonClick(object sender, RoutedEventArgs e)
+        {
+            var url = TestStreamUrlTextBox.Text?.Trim();
+            if (string.IsNullOrEmpty(url))
+            {
+                await ShowErrorDialog("Input Error", "Please enter a valid URL or file path.");
+                return;
+            }
+
+            await InitializeVideoPlayerAsync();
+            if (_videoPlayerService != null)
+            {
+                try
+                {
+                    CurrentChannelText.Text = $"Loading: {url}";
+                    var success = await _videoPlayerService.LoadFileAsync(url, autoPlay: true);
+                    if (success)
+                    {
+                        CurrentChannelText.Text = $"Playing: {url}";
+                    }
+                    else
+                    {
+                        CurrentChannelText.Text = "Failed to load media";
+                        await ShowErrorDialog("Playback Error", "Failed to load the media. Please check the URL and try again.");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    CurrentChannelText.Text = "Error loading media";
+                    await ShowErrorDialog("Playback Error", $"An error occurred while loading the media: {ex.Message}");
+                }
+            }
+        }
+
+        private async void OnVolumeSliderValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
+        {
+            if (_videoPlayerService != null)
+            {
+                await _videoPlayerService.SetVolumeAsync((int)e.NewValue);
+            }
+        }
+
+        // Video Player Event Callbacks
+        private void OnVideoPlayerError(object? sender, string errorMessage)
+        {
+            DispatcherQueue.TryEnqueue(async () =>
+            {
+                await ShowErrorDialog("Video Player Error", errorMessage);
+            });
+        }
+
+        private void OnVideoPlayerPlaybackStarted(object? sender, EventArgs e)
+        {
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                // Update UI state for playing
+                PlayButton.IsEnabled = false;
+                PauseButton.IsEnabled = true;
+                StopButton.IsEnabled = true;
+            });
+        }
+
+        private void OnVideoPlayerPlaybackPaused(object? sender, EventArgs e)
+        {
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                // Update UI state for paused
+                PlayButton.IsEnabled = true;
+                PauseButton.IsEnabled = false;
+                StopButton.IsEnabled = true;
+            });
+        }
+
+        private void OnVideoPlayerPlaybackStopped(object? sender, EventArgs e)
+        {
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                // Update UI state for stopped
+                PlayButton.IsEnabled = true;
+                PauseButton.IsEnabled = false;
+                StopButton.IsEnabled = false;
+            });
         }
     }
 

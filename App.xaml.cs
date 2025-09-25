@@ -47,8 +47,10 @@ public partial class App : Application
     protected override void OnLaunched(Microsoft.UI.Xaml.LaunchActivatedEventArgs args)
     {
         m_window = new MainWindow();
+        MainWindow = m_window;
         m_window.Activate();
     }
 
     private Window? m_window;
+    public static Window? MainWindow { get; private set; }
 }
