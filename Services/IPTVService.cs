@@ -187,6 +187,10 @@ public class IPTVService
 
         try
         {
+            // First load categories to get group names
+            var categories = await GetLiveCategoriesAsync();
+            var groupNameLookup = categories.ToDictionary(c => c.GroupId, c => c.Name);
+
             string streamsUrl = $"{_serverUrl}/player_api.php?username={_username}&password={_password}&action=get_live_streams";
             HttpResponseMessage response = await _httpClient.GetAsync(streamsUrl);
             if (!response.IsSuccessStatusCode)
@@ -226,13 +230,40 @@ public class IPTVService
 
                     string name = element.TryGetProperty("name", out JsonElement nameProp) ? nameProp.GetString() ?? $"Channel {channelId}" : $"Channel {channelId}";
                     string? streamIcon = element.TryGetProperty("stream_icon", out JsonElement iconProp) ? iconProp.GetString() : null;
-                    string streamUrl = BuildStreamUrl(channelId);
+
+                    string? directSource = null;
+                    if (element.TryGetProperty("direct_source", out JsonElement directSourceProp))
+                    {
+                        directSource = directSourceProp.GetString();
+                    }
+                    else if (element.TryGetProperty("stream_source", out JsonElement streamSourceProp))
+                    {
+                        directSource = streamSourceProp.GetString();
+                    }
+
+                    string? containerExtension = null;
+                    if (element.TryGetProperty("container_extension", out JsonElement extensionProp))
+                    {
+                        containerExtension = extensionProp.GetString();
+                    }
+                    else if (element.TryGetProperty("extension", out JsonElement altExtensionProp))
+                    {
+                        containerExtension = altExtensionProp.GetString();
+                    }
+
+                    string streamUrl = !string.IsNullOrWhiteSpace(directSource)
+                        ? directSource
+                        : BuildStreamUrl(channelId, containerExtension);
+                    
+                    // Get group name from lookup
+                    string groupName = groupNameLookup.TryGetValue(groupId, out string? lookupName) ? lookupName : $"Group {groupId}";
 
                     channels.Add(new ChannelInfo
                     {
                         ChannelId = channelId,
                         Name = name,
                         GroupId = groupId,
+                        GroupName = groupName,
                         StreamIcon = string.IsNullOrWhiteSpace(streamIcon) ? null : streamIcon,
                         StreamUrl = streamUrl
                     });
@@ -247,10 +278,25 @@ public class IPTVService
         return channels;
     }
 
-    public string BuildStreamUrl(int streamId)
+    public string BuildStreamUrl(int streamId, string? extension = null)
     {
         EnsureAuthenticated();
-        return $"{_serverUrl}/live/{_username}/{_password}/{streamId}.ts";
+
+        string baseUrl = string.IsNullOrWhiteSpace(_serverUrl)
+            ? string.Empty
+            : _serverUrl.TrimEnd('/')
+                .Replace(" ", string.Empty, StringComparison.Ordinal);
+
+        if (string.IsNullOrWhiteSpace(baseUrl))
+        {
+            return string.Empty;
+        }
+
+        string sanitizedExtension = string.IsNullOrWhiteSpace(extension)
+            ? "ts"
+            : extension.Trim().TrimStart('.');
+
+        return $"{baseUrl}/live/{_username}/{_password}/{streamId}.{sanitizedExtension}";
     }
     
     /// <summary>

@@ -1,12 +1,17 @@
 ﻿using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using HyggePlay.Models;
 using HyggePlay.Services;
 using WinRT.Interop;
+using Microsoft.UI.Xaml.Media;
+using System.Runtime.InteropServices;
+using Windows.Foundation;
 
 namespace HyggePlay
 {
@@ -18,7 +23,18 @@ namespace HyggePlay
         private readonly ObservableCollection<ChannelInfo> _channels;
         private readonly ObservableCollection<ChannelInfo> _filteredChannels;
         private readonly ObservableCollection<ChannelGroupOption> _channelGroups;
+    private readonly SemaphoreSlim _dialogSemaphore = new(1, 1);
+    private readonly SemaphoreSlim _playbackSemaphore = new(1, 1);
         private VideoPlayerService? _videoPlayerService;
+        private int? _activeUserId;
+    private int? _currentChannelId;
+        private IntPtr _videoHostHwnd = IntPtr.Zero;
+        private readonly TaskCompletionSource<bool> _videoHostReadyTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private double _lastRasterizationScale = 1.0;
+    private int _lastHostX = -1;
+    private int _lastHostY = -1;
+    private int _lastHostWidth = -1;
+    private int _lastHostHeight = -1;
 
         public MainWindow()
         {
@@ -34,6 +50,12 @@ namespace HyggePlay
 
             // Initialize after window loads
             _ = InitializeAsync();
+
+        this.SizeChanged += MainWindow_SizeChanged;
+        this.Closed += MainWindow_Closed;
+        VideoContainer.Loaded += VideoContainer_Loaded;
+        VideoContainer.SizeChanged += VideoContainer_SizeChanged;
+        VideoContainer.LayoutUpdated += VideoContainer_LayoutUpdated;
         }
 
         private async Task InitializeAsync()
@@ -50,6 +72,7 @@ namespace HyggePlay
                 UserComboBox.SelectionChanged += UserComboBox_SelectionChanged;
                 ChannelGroupComboBox.SelectionChanged += ChannelGroupComboBox_SelectionChanged;
                 ChannelSearchTextBox.TextChanged += ChannelSearchTextBox_TextChanged;
+                ChannelResultsListView.SelectionChanged += ChannelResultsListView_SelectionChanged;
 
                 // Set up data sources
                 UserComboBox.ItemsSource = _users;
@@ -212,6 +235,7 @@ namespace HyggePlay
             {
                 LoadUserButton.IsEnabled = false;
                 LoadUserButton.Content = "Loading...";
+                _activeUserId = null;
 
                 if (user.Id <= 0)
                 {
@@ -229,8 +253,16 @@ namespace HyggePlay
                     user.Id = matchedUser.Id;
                 }
 
+                if (user.Id <= 0)
+                {
+                    await ShowErrorDialog("Load Error", "The selected profile is invalid. Please log in again.");
+                    return;
+                }
+
+                _activeUserId = user.Id;
+
                 // First try to get channels from database
-                var savedChannels = await _databaseService.SearchChannelsAsync(user.Id, null, null, 1000);
+                var savedChannels = await _databaseService.SearchChannelsAsync(user.Id, null, null);
                 
                 if (savedChannels.Any())
                 {
@@ -265,7 +297,7 @@ namespace HyggePlay
                 }
 
                 // Update UI
-                UpdateChannelGroups();
+                await UpdateChannelGroupsAsync();
                 FilterChannels();
                 ChannelSearchPanel.Visibility = Visibility.Visible;
             }
@@ -280,20 +312,70 @@ namespace HyggePlay
             }
         }
 
-        private void UpdateChannelGroups()
+        private async Task UpdateChannelGroupsAsync()
         {
             _channelGroups.Clear();
             _channelGroups.Add(new ChannelGroupOption { Name = "All Groups", Value = "" });
 
-            var groups = _channels
+            var groupedChannels = _channels
                 .Where(c => !string.IsNullOrEmpty(c.GroupId))
                 .GroupBy(c => c.GroupId)
-                .Select(g => new ChannelGroupOption { Name = $"Group {g.Key} ({g.Count()})", Value = g.Key })
-                .OrderBy(g => g.Value);
+                .Select(g => new
+                {
+                    GroupId = g.Key,
+                    Count = g.Count(),
+                    NameFromChannels = g.Select(ch => ch.GroupName)
+                        .FirstOrDefault(name => !string.IsNullOrWhiteSpace(name))
+                })
+                .ToList();
 
-            foreach (var group in groups)
+            if (groupedChannels.Count == 0)
             {
-                _channelGroups.Add(group);
+                return;
+            }
+
+            Dictionary<string, string> displayNameLookup = groupedChannels
+                .ToDictionary(g => g.GroupId, g => g.NameFromChannels ?? string.Empty);
+
+            if (_activeUserId.HasValue)
+            {
+                try
+                {
+                    var storedGroups = await _databaseService.GetChannelGroupsAsync(_activeUserId.Value);
+                    foreach (var group in storedGroups)
+                    {
+                        if (string.IsNullOrWhiteSpace(group.GroupId))
+                        {
+                            continue;
+                        }
+
+                        displayNameLookup[group.GroupId] = string.IsNullOrWhiteSpace(group.Name)
+                            ? group.GroupId
+                            : group.Name;
+                    }
+                }
+                catch
+                {
+                    // Ignore database errors while resolving group names and fall back to channel data.
+                }
+            }
+
+            foreach (var group in groupedChannels
+                .OrderBy(g =>
+                    displayNameLookup.TryGetValue(g.GroupId, out string? value) && !string.IsNullOrWhiteSpace(value)
+                        ? value
+                        : g.GroupId,
+                    StringComparer.CurrentCultureIgnoreCase))
+            {
+                string displayName = displayNameLookup.TryGetValue(group.GroupId, out string? lookupName) && !string.IsNullOrWhiteSpace(lookupName)
+                    ? lookupName
+                    : group.GroupId;
+
+                _channelGroups.Add(new ChannelGroupOption
+                {
+                    Name = $"{displayName} ({group.Count})",
+                    Value = group.GroupId
+                });
             }
         }
 
@@ -327,55 +409,377 @@ namespace HyggePlay
             {
                 filtered = filtered.Where(c => 
                     c.Name?.ToLower().Contains(searchText) == true ||
-                    c.GroupId?.ToLower().Contains(searchText) == true);
+                    c.GroupId?.ToLower().Contains(searchText) == true ||
+                    c.GroupName?.ToLower().Contains(searchText) == true);
             }
 
-            foreach (var channel in filtered.Take(100)) // Limit results for performance
+            foreach (var channel in filtered)
             {
                 _filteredChannels.Add(channel);
             }
         }
 
+        private void VideoContainer_Loaded(object sender, RoutedEventArgs e)
+        {
+            EnsureVideoHost();
+            if (VideoContainer.XamlRoot is XamlRoot xamlRoot)
+            {
+                _lastRasterizationScale = xamlRoot.RasterizationScale;
+                xamlRoot.Changed += XamlRoot_Changed;
+            }
+
+            _videoHostReadyTcs.TrySetResult(true);
+        }
+
+        private void VideoContainer_SizeChanged(object sender, SizeChangedEventArgs e)
+        {
+            UpdateVideoHostPlacement();
+        }
+
+        private void VideoContainer_LayoutUpdated(object? sender, object e)
+        {
+            UpdateVideoHostPlacement();
+        }
+
+        private void MainWindow_SizeChanged(object sender, WindowSizeChangedEventArgs e)
+        {
+            UpdateVideoHostPlacement();
+        }
+
+        private void XamlRoot_Changed(XamlRoot sender, XamlRootChangedEventArgs args)
+        {
+            _lastRasterizationScale = sender.RasterizationScale;
+            UpdateVideoHostPlacement();
+        }
+
+        private void MainWindow_Closed(object sender, WindowEventArgs args)
+        {
+            if (_videoHostHwnd != IntPtr.Zero)
+            {
+                NativeMethods.DestroyWindow(_videoHostHwnd);
+                _videoHostHwnd = IntPtr.Zero;
+                _lastHostX = _lastHostY = _lastHostWidth = _lastHostHeight = -1;
+            }
+
+            if (VideoContainer.XamlRoot is XamlRoot xamlRoot)
+            {
+                xamlRoot.Changed -= XamlRoot_Changed;
+            }
+
+            VideoContainer.Loaded -= VideoContainer_Loaded;
+            VideoContainer.SizeChanged -= VideoContainer_SizeChanged;
+            VideoContainer.LayoutUpdated -= VideoContainer_LayoutUpdated;
+            this.SizeChanged -= MainWindow_SizeChanged;
+        }
+
+        private void EnsureVideoHost()
+        {
+            if (_videoHostHwnd != IntPtr.Zero)
+            {
+                UpdateVideoHostPlacement();
+                return;
+            }
+
+            if (VideoContainer.ActualWidth <= 0 || VideoContainer.ActualHeight <= 0)
+            {
+                return;
+            }
+
+            IntPtr mainWindowHandle = WindowNative.GetWindowHandle(this);
+            if (mainWindowHandle == IntPtr.Zero)
+            {
+                return;
+            }
+
+            double scale = VideoContainer.XamlRoot?.RasterizationScale ?? _lastRasterizationScale;
+            if (scale <= 0)
+            {
+                scale = 1.0;
+            }
+
+            try
+            {
+                GeneralTransform transform = VideoContainer.TransformToVisual(RootGrid);
+                Point offset = transform.TransformPoint(new Point(0, 0));
+
+                int x = (int)Math.Round(offset.X * scale);
+                int y = (int)Math.Round(offset.Y * scale);
+                int width = Math.Max(1, (int)Math.Round(VideoContainer.ActualWidth * scale));
+                int height = Math.Max(1, (int)Math.Round(VideoContainer.ActualHeight * scale));
+
+                IntPtr moduleHandle = NativeMethods.GetModuleHandle(null);
+                _videoHostHwnd = NativeMethods.CreateWindowExW(
+                    NativeMethods.WS_EX_NOREDIRECTIONBITMAP,
+                    "STATIC",
+                    string.Empty,
+                    NativeMethods.WS_CHILD | NativeMethods.WS_VISIBLE | NativeMethods.WS_CLIPSIBLINGS | NativeMethods.WS_CLIPCHILDREN,
+                    x,
+                    y,
+                    width,
+                    height,
+                    mainWindowHandle,
+                    IntPtr.Zero,
+                    moduleHandle,
+                    IntPtr.Zero);
+
+                if (_videoHostHwnd != IntPtr.Zero)
+                {
+                    NativeMethods.SetWindowPos(_videoHostHwnd, IntPtr.Zero, x, y, width, height, NativeMethods.SWP_NOZORDER | NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_SHOWWINDOW);
+                    _lastHostX = x;
+                    _lastHostY = y;
+                    _lastHostWidth = width;
+                    _lastHostHeight = height;
+                    _ = LogService.LogInfoAsync("VideoHost created", new Dictionary<string, string>
+                    {
+                        { "hwnd", _videoHostHwnd.ToString("X") },
+                        { "x", x.ToString() },
+                        { "y", y.ToString() },
+                        { "width", width.ToString() },
+                        { "height", height.ToString() },
+                        { "scale", scale.ToString("F2") }
+                    });
+                }
+                else
+                {
+                    _ = LogService.LogErrorAsync("VideoHost creation failure", new InvalidOperationException("Failed to create video host window"), null);
+                }
+            }
+            catch (Exception ex)
+            {
+                _ = LogService.LogErrorAsync("VideoHost creation exception", ex, null);
+            }
+        }
+
+        private void UpdateVideoHostPlacement()
+        {
+            if (VideoContainer.ActualWidth <= 0 || VideoContainer.ActualHeight <= 0)
+            {
+                return;
+            }
+
+            double scale = VideoContainer.XamlRoot?.RasterizationScale ?? _lastRasterizationScale;
+            if (scale <= 0)
+            {
+                scale = 1.0;
+            }
+
+            try
+            {
+                GeneralTransform transform = VideoContainer.TransformToVisual(RootGrid);
+                Point offset = transform.TransformPoint(new Point(0, 0));
+
+                int x = (int)Math.Round(offset.X * scale);
+                int y = (int)Math.Round(offset.Y * scale);
+                int width = Math.Max(1, (int)Math.Round(VideoContainer.ActualWidth * scale));
+                int height = Math.Max(1, (int)Math.Round(VideoContainer.ActualHeight * scale));
+
+                if (_videoHostHwnd != IntPtr.Zero)
+                {
+                    bool changed = x != _lastHostX || y != _lastHostY || width != _lastHostWidth || height != _lastHostHeight;
+                    if (changed)
+                    {
+                        NativeMethods.SetWindowPos(_videoHostHwnd, IntPtr.Zero, x, y, width, height, NativeMethods.SWP_NOZORDER | NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_SHOWWINDOW);
+                        _lastHostX = x;
+                        _lastHostY = y;
+                        _lastHostWidth = width;
+                        _lastHostHeight = height;
+                        _ = LogService.LogInfoAsync("VideoHost repositioned", new Dictionary<string, string>
+                        {
+                            { "hwnd", _videoHostHwnd.ToString("X") },
+                            { "x", x.ToString() },
+                            { "y", y.ToString() },
+                            { "width", width.ToString() },
+                            { "height", height.ToString() },
+                            { "scale", scale.ToString("F2") }
+                        });
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _ = LogService.LogErrorAsync("VideoHost placement exception", ex, null);
+            }
+        }
+
+        private async void ChannelResultsListView_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            var selectedChannel = e.AddedItems?.OfType<ChannelInfo>().FirstOrDefault();
+            if (selectedChannel != null)
+            {
+                await PlayChannelAsync(selectedChannel);
+            }
+        }
+
+        private async Task PlayChannelAsync(ChannelInfo channel)
+        {
+            if (string.IsNullOrEmpty(channel.StreamUrl))
+            {
+                await ShowErrorDialog("Channel Error", $"Channel '{channel.Name}' has no URL configured.");
+                return;
+            }
+
+            string streamUrl = channel.StreamUrl!;
+
+            await _playbackSemaphore.WaitAsync();
+            try
+            {
+                if (_currentChannelId == channel.ChannelId &&
+                    string.Equals(_videoPlayerService?.CurrentUrl, streamUrl, StringComparison.OrdinalIgnoreCase))
+                {
+                    return;
+                }
+
+                _currentChannelId = channel.ChannelId;
+
+                await LogService.LogInfoAsync("PlayChannelAsync start", new Dictionary<string, string>
+                {
+                    { "channelId", channel.ChannelId.ToString() },
+                    { "channelName", channel.Name },
+                    { "groupId", channel.GroupId },
+                    { "streamUrl", streamUrl }
+                });
+
+                await InitializeVideoPlayerAsync();
+                if (_videoPlayerService == null || !_videoPlayerService.IsInitialized)
+                {
+                    _currentChannelId = null;
+                    await LogService.LogErrorAsync("PlayChannelAsync initialization failure", new InvalidOperationException("Video player service not available"), new Dictionary<string, string>
+                    {
+                        { "channelId", channel.ChannelId.ToString() },
+                        { "channelName", channel.Name }
+                    });
+                    await ShowErrorDialog("Playback Error", "Video player failed to initialize. Please try again.");
+                    return;
+                }
+
+                try
+                {
+                    CurrentChannelText.Text = $"Loading: {channel.Name}";
+
+                    // Stop any current playback first
+                    await _videoPlayerService.StopAsync();
+
+                    var success = await _videoPlayerService.LoadFileAsync(streamUrl, autoPlay: true);
+                    if (success)
+                    {
+                        CurrentChannelText.Text = $"Playing: {channel.Name}";
+                        await LogService.LogInfoAsync("PlayChannelAsync success", new Dictionary<string, string>
+                        {
+                            { "channelId", channel.ChannelId.ToString() },
+                            { "channelName", channel.Name }
+                        });
+                    }
+                    else
+                    {
+                        _currentChannelId = null;
+                        CurrentChannelText.Text = "Failed to load channel";
+                        await LogService.LogErrorAsync("PlayChannelAsync load failure", new InvalidOperationException("LoadFileAsync returned false"), new Dictionary<string, string>
+                        {
+                            { "channelId", channel.ChannelId.ToString() },
+                            { "channelName", channel.Name },
+                            { "streamUrl", streamUrl }
+                        });
+                        await ShowErrorDialog("Playback Error", $"Failed to load channel '{channel.Name}'. The stream may be unavailable.");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _currentChannelId = null;
+                    CurrentChannelText.Text = "Error loading channel";
+                    await LogService.LogErrorAsync("PlayChannelAsync exception", ex, new Dictionary<string, string>
+                    {
+                        { "channelId", channel.ChannelId.ToString() },
+                        { "channelName", channel.Name },
+                        { "streamUrl", streamUrl }
+                    });
+                    await ShowErrorDialog("Playback Error", $"An error occurred while loading channel '{channel.Name}': {ex.Message}");
+                }
+            }
+            finally
+            {
+                _playbackSemaphore.Release();
+            }
+        }
+
         private async Task ShowErrorDialog(string title, string message)
         {
-            var dialog = new ContentDialog
+            await _dialogSemaphore.WaitAsync();
+            try
             {
-                Title = title,
-                Content = message,
-                CloseButtonText = "OK"
-            };
-            dialog.XamlRoot = this.Content.XamlRoot;
-            await dialog.ShowAsync();
+                var dialog = new ContentDialog
+                {
+                    Title = title,
+                    Content = message,
+                    CloseButtonText = "OK"
+                };
+                dialog.XamlRoot = this.Content.XamlRoot;
+                await dialog.ShowAsync();
+            }
+            finally
+            {
+                _dialogSemaphore.Release();
+            }
         }
 
         // Video Player Methods
         private async Task InitializeVideoPlayerAsync()
         {
             if (_videoPlayerService != null)
-                return;
+            {
+                if (_videoPlayerService.IsInitialized)
+                    return;
+
+                await _videoPlayerService.DisposeAsync();
+                _videoPlayerService = null;
+            }
 
             try
             {
-                _videoPlayerService = new VideoPlayerService();
-                
-                // Get window handle for mpv integration
-                var windowHandle = WindowNative.GetWindowHandle(this);
-                
-                var success = await _videoPlayerService.InitializeAsync(windowHandle);
+                var playerService = new VideoPlayerService();
+
+                await _videoHostReadyTcs.Task;
+                EnsureVideoHost();
+                UpdateVideoHostPlacement();
+
+                if (_videoHostHwnd == IntPtr.Zero)
+                {
+                    await playerService.DisposeAsync();
+                    await LogService.LogErrorAsync("InitializeVideoPlayerAsync failure", new InvalidOperationException("Video host window not available"));
+                    await ShowErrorDialog("Video Player Error", "Video surface could not be created. Please try resizing the window and retry.");
+                    return;
+                }
+
+                var success = await playerService.InitializeAsync(_videoHostHwnd);
                 if (!success)
                 {
+                    await playerService.DisposeAsync();
+                    await LogService.LogErrorAsync("InitializeVideoPlayerAsync failure", new InvalidOperationException("Video player initialization returned false"));
                     await ShowErrorDialog("Video Player Error", "Failed to initialize video player.");
                     return;
                 }
+
+                _videoPlayerService = playerService;
 
                 // Subscribe to events
                 _videoPlayerService.ErrorOccurred += OnVideoPlayerError;
                 _videoPlayerService.PlaybackStarted += OnVideoPlayerPlaybackStarted;
                 _videoPlayerService.PlaybackPaused += OnVideoPlayerPlaybackPaused;
                 _videoPlayerService.PlaybackStopped += OnVideoPlayerPlaybackStopped;
+
+                await LogService.LogInfoAsync("InitializeVideoPlayerAsync success", new Dictionary<string, string>
+                {
+                    { "playerCreated", "true" }
+                });
             }
             catch (Exception ex)
             {
+                if (_videoPlayerService != null)
+                {
+                    await _videoPlayerService.DisposeAsync();
+                    _videoPlayerService = null;
+                }
+
+                await LogService.LogErrorAsync("InitializeVideoPlayerAsync exception", ex, null);
                 await ShowErrorDialog("Video Player Error", $"Failed to initialize video player: {ex.Message}");
             }
         }
@@ -454,6 +858,11 @@ namespace HyggePlay
         {
             DispatcherQueue.TryEnqueue(async () =>
             {
+                await LogService.LogErrorAsync("VideoPlayerService error", new InvalidOperationException(errorMessage), new Dictionary<string, string>
+                {
+                    { "currentUrl", _videoPlayerService?.CurrentUrl ?? string.Empty },
+                    { "isPlaying", (_videoPlayerService?.IsPlaying ?? false).ToString() }
+                });
                 await ShowErrorDialog("Video Player Error", errorMessage);
             });
         }
@@ -492,9 +901,56 @@ namespace HyggePlay
         }
     }
 
+    internal static class NativeMethods
+    {
+        internal const int WS_CHILD = 0x40000000;
+        internal const int WS_VISIBLE = 0x10000000;
+        internal const int WS_CLIPSIBLINGS = 0x04000000;
+        internal const int WS_CLIPCHILDREN = 0x02000000;
+        internal const int WS_EX_NOREDIRECTIONBITMAP = 0x00200000;
+        internal const uint SWP_NOZORDER = 0x0004;
+        internal const uint SWP_NOACTIVATE = 0x0010;
+        internal const uint SWP_SHOWWINDOW = 0x0040;
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        internal static extern IntPtr CreateWindowExW(
+            int dwExStyle,
+            string lpClassName,
+            string lpWindowName,
+            int dwStyle,
+            int X,
+            int Y,
+            int nWidth,
+            int nHeight,
+            IntPtr hWndParent,
+            IntPtr hMenu,
+            IntPtr hInstance,
+            IntPtr lpParam);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool SetWindowPos(
+            IntPtr hWnd,
+            IntPtr hWndInsertAfter,
+            int X,
+            int Y,
+            int cx,
+            int cy,
+            uint uFlags);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool DestroyWindow(IntPtr hWnd);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        internal static extern IntPtr GetModuleHandle(string? lpModuleName);
+    }
+
     public class ChannelGroupOption
     {
         public string Name { get; set; } = string.Empty;
         public string Value { get; set; } = string.Empty;
+
+        public override string ToString() => Name;
     }
 }

@@ -148,13 +148,7 @@
                         MinHeight="300">
                     <Border x:Name="VideoContainer"
                             Background="Black"
-                            CornerRadius="8">
-                        <TextBlock Text="Video will display here"
-                                   Foreground="#FF666666"
-                                   HorizontalAlignment="Center"
-                                   VerticalAlignment="Center"
-                                   FontSize="16" />
-                    </Border>
+                            CornerRadius="8" />
                 </Border>
 
                 <!-- Video Controls -->
@@ -273,10 +267,11 @@
                         BorderThickness="1"
                         Padding="12">
                     <ListView x:Name="ChannelResultsListView"
-                              SelectionMode="None"
+                              SelectionMode="Single"
                               Background="Transparent"
                               BorderThickness="0"
-                              IsItemClickEnabled="False">
+                              IsItemClickEnabled="True"
+                              SelectionChanged="ChannelResultsListView_SelectionChanged">
                         <ListView.ItemTemplate>
                             <DataTemplate>
                                 <StackPanel Spacing="4" Margin="8">
@@ -284,7 +279,7 @@
                                                FontSize="16"
                                                FontWeight="SemiBold"
                                                Foreground="White" />
-                                    <TextBlock Text="{Binding GroupId}"
+                                    <TextBlock Text="{Binding GroupName}"
                                                FontSize="12"
                                                Foreground="#FFAAAAAA" />
                                 </StackPanel>

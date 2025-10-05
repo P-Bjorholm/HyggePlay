@@ -230,7 +230,7 @@ namespace HyggePlay.Services
                 {
                     await using SqliteCommand groupCommand = connection.CreateCommand();
                     groupCommand.Transaction = transaction;
-                    groupCommand.CommandText = @"INSERT INTO ChannelGroups (UserId, GroupIdentifier, Name) VALUES ($userId, $groupId, $name)";
+                    groupCommand.CommandText = @"INSERT OR REPLACE INTO ChannelGroups (UserId, GroupIdentifier, Name) VALUES ($userId, $groupId, $name)";
                     
                     foreach (ChannelGroupInfo group in groups)
                     {
@@ -323,6 +323,12 @@ namespace HyggePlay.Services
                 }
 
                 await transaction.CommitAsync();
+                await LogService.LogInfoAsync("ReplaceChannelDataAsync success", new Dictionary<string, string>
+                {
+                    { "userId", userId.ToString() },
+                    { "groupCount", groups.Count.ToString() },
+                    { "channelCount", channels.Count.ToString() }
+                });
             }
             catch (Exception ex)
             {
@@ -361,30 +367,37 @@ namespace HyggePlay.Services
             return groups;
         }
 
-        public async Task<List<ChannelInfo>> SearchChannelsAsync(int userId, string? groupId, string? query, int limit = 250)
+        public async Task<List<ChannelInfo>> SearchChannelsAsync(int userId, string? groupId, string? query, int? limit = null)
         {
             List<ChannelInfo> channels = new();
             
             await using SqliteConnection connection = CreateConnection();
             await connection.OpenAsync();
 
-            string sql = "SELECT ChannelIdentifier, Name, GroupIdentifier, StreamIcon, StreamUrl FROM Channels WHERE UserId = $userId";
+            string sql = @"SELECT c.ChannelIdentifier, c.Name, c.GroupIdentifier, c.StreamIcon, c.StreamUrl, cg.Name AS GroupName 
+                          FROM Channels c 
+                          LEFT JOIN ChannelGroups cg ON c.GroupIdentifier = cg.GroupIdentifier AND cg.UserId = $userId 
+                          WHERE c.UserId = $userId";
             List<SqliteParameter> parameters = new() { new("$userId", userId) };
 
             if (!string.IsNullOrEmpty(groupId))
             {
-                sql += " AND GroupIdentifier = $groupId";
+                sql += " AND c.GroupIdentifier = $groupId";
                 parameters.Add(new("$groupId", groupId));
             }
 
             if (!string.IsNullOrEmpty(query))
             {
-                sql += " AND Name LIKE $query";
+                sql += " AND c.Name LIKE $query";
                 parameters.Add(new("$query", $"%{query}%"));
             }
 
-            sql += " ORDER BY Name LIMIT $limit";
-            parameters.Add(new("$limit", limit));
+            sql += " ORDER BY c.Name";
+            if (limit.HasValue && limit.Value > 0)
+            {
+                sql += " LIMIT $limit";
+                parameters.Add(new("$limit", limit.Value));
+            }
 
             await using SqliteCommand command = connection.CreateCommand();
             command.CommandText = sql;
@@ -402,7 +415,8 @@ namespace HyggePlay.Services
                     Name = reader.GetString(1),
                     GroupId = reader.GetString(2),
                     StreamIcon = reader.IsDBNull(3) ? null : reader.GetString(3),
-                    StreamUrl = reader.IsDBNull(4) ? null : reader.GetString(4)
+                    StreamUrl = reader.IsDBNull(4) ? null : reader.GetString(4),
+                    GroupName = reader.IsDBNull(5) ? string.Empty : reader.GetString(5)
                 });
             }
             
